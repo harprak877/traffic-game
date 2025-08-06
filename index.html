@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Traffic Management Game Starter</title>
+    <!-- We use p5.js to simplify canvas drawing and input handling for beginners -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.5.0/p5.min.js"></script>
+</head>
+<body>
+<script>
+// dynamic grid configuration
+const gridSize = 30               // pixel size of each grid square
+let cols = 20                     // initial columns
+let rows = 15                     // initial rows
+// Expansion and info panel configuration
+const EXPAND_SECONDS = 30            // seconds between expansions
+let expandInterval = EXPAND_SECONDS * 60  // frames between expansions (assuming 60 fps)
+const MAX_SPAWN_POINTS = 10         // cap for spawn/exit arrays
+let lastRotationTime = 0            // for debouncing right-click rotation
+const INFO_PANEL_HEIGHT = 60        // height of info panel
+let expandTimer = 0                // counts frames for expansion
+
+// data structures
+let roadGrid = []      // holds placed road tiles or null
+let cars = []          // list of car objects currently on map
+let spawnPoints = []   // entry locations where cars appear
+let exitPoints = []    // exit locations where cars aim to reach
+let congestionGrid = [] // holds congestion counts per cell
+
+// traffic control variables
+let spawnTimer = 0      // counts frames between spawns
+let spawnInterval = 120 // frames per new car, decreases over time
+
+// user selection state
+let selectedRoadType = 'straight'  // current road piece chosen by player
+
+function setup() {
+    let cnv = createCanvas(gridSize * cols, gridSize * rows)
+    // disable default context menu to allow right-click rotation
+    cnv.elt.oncontextmenu = () => false
+    initGrid()          // initialize empty grid and congestion
+    initCongestionGrid()
+    initSpawnAndExit()  // set up example entry and exit
+}
+
+// initialize grid as null values
+function initGrid() {
+    roadGrid = []
+    for (let i = 0; i < cols; i++) {
+        roadGrid[i] = []
+        for (let j = 0; j < rows; j++) {
+            roadGrid[i][j] = null
+        }
+    }
+}
+
+// initialize congestion grid counts
+function initCongestionGrid() {
+    congestionGrid = []
+    for (let i = 0; i < cols; i++) {
+        congestionGrid[i] = []
+        for (let j = 0; j < rows; j++) {
+            congestionGrid[i][j] = 0
+        }
+    }
+}
+
+// define one spawn on left edge and one exit on right edge
+function initSpawnAndExit() {
+    spawnPoints = [ createVector(0, floor(rows / 2)) ]
+    exitPoints  = [ createVector(cols - 1, floor(rows / 2)) ]
+}
+
+function draw() {
+    background(180, 220, 180)   // grass color
+    drawGrid()                   // show grid lines
+    handleTraffic()              // spawn cars and update movement
+    resetCongestion()            // clear counts and recount each frame
+    drawRoads()                  // draw road tiles with congestion glow
+    drawCars()                   // render each car on top
+    showSelectionInfo()          // display which road piece is selected
+
+    // expand map over time
+    expandTimer++
+    if (expandTimer >= expandInterval) {
+        expandMap()
+        expandTimer = 0
+    }
+}
+
+// draw grid lines
+function drawGrid() {
+    stroke(200)
+    for (let i = 0; i <= cols; i++) {
+        line(i * gridSize, 0, i * gridSize, height)
+    }
+    for (let j = 0; j <= rows; j++) {
+        line(0, j * gridSize, width, j * gridSize)
+    }
+}
+
+// expand grid by one column and one row
+function expandMap() {
+    cols++
+    rows++
+    resizeCanvas(gridSize * cols, gridSize * rows)
+    // extend each existing row
+    for (let i = 0; i < cols; i++) {
+        if (!roadGrid[i]) {
+            roadGrid[i] = Array(rows).fill(null)
+            congestionGrid[i] = Array(rows).fill(0)
+        } else {
+            roadGrid[i].push(null)
+            congestionGrid[i].push(0)
+        }
+    }
+    // add new column
+    if (roadGrid.length < cols) {
+        roadGrid.push(Array(rows).fill(null))
+        congestionGrid.push(Array(rows).fill(0))
+    }
+    // adjust spawn/exit on new edges
+    spawnPoints.push(createVector(0, rows - 1))
+    exitPoints.push(createVector(cols - 1, 0))
+    // prune old spawn/exit entries
+    if (spawnPoints.length > MAX_SPAWN_POINTS) spawnPoints.shift()
+    if (exitPoints.length  > MAX_SPAWN_POINTS) exitPoints.shift()
+    // increase traffic further upon expansion
+    if (spawnInterval > 20) spawnInterval -= 10
+}
+
+// reset congestion counts
+function resetCongestion() {
+    for (let i = 0; i < cols; i++) {
+        for (let j = 0; j < rows; j++) {
+            congestionGrid[i][j] = 0
+        }
+    }
+    // count cars per cell
+    for (let c of cars) {
+        let ci = floor(c.pos.x / gridSize)
+        let cj = floor(c.pos.y / gridSize)
+        if (ci >= 0 && ci < cols && cj >= 0 && cj < rows) {
+            congestionGrid[ci][cj]++
+        }
+    }
+}
+
+// class and helper functions remain unchanged
+class RoadTile {
+    constructor(x, y, type, rotation) {
+        this.x = x; this.y = y
+        this.type = type
+        this.rotation = rotation
+        this.connections = getConnections(type, rotation)
+    }
+}
+
+function getConnections(type, rotation) {
+    const base = {
+        straight: [[1,0],[-1,0]],
+        corner:   [[1,0],[0,1]],
+        t_junction:[[0,-1],[1,0],[0,1]],
+        cross:    [[1,0],[-1,0],[0,-1],[0,1]],
+        roundabout:[[1,0],[0,1],[-1,0],[0,-1]],
+        flyover:  [[1,0],[-1,0]]
+    }
+    if (!base[type]) return []
+    let dirs = base[type].map(d => d.slice())
+    let times = (rotation / 90) % 4
+    for (let k = 0; k < times; k++) dirs = dirs.map(d => [d[1],-d[0]])
+    return dirs
+}
+
+function drawRoads() {
+    for (let i = 0; i < cols; i++)
+    for (let j = 0; j < rows; j++) {
+        const tile = roadGrid[i]?.[j]
+        if (!tile) continue
+        if (congestionGrid[i][j] > 2) {
+            noStroke(); fill(255,0,0,100)
+            rect(i*gridSize,j*gridSize,gridSize,gridSize)
+        }
+        noStroke(); fill(100)
+        push(); translate(i*gridSize+gridSize/2, j*gridSize+gridSize/2)
+        rotate(radians(tile.rotation)); drawTileShape(tile.type); pop()
+    }
+}
+
+function drawTileShape(type) {
+    switch(type) {
+        case 'straight': rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); break
+        case 'corner': rect(-gridSize/6,0,gridSize/3,gridSize/2); rect(0,-gridSize/6,gridSize/2,gridSize/3); break
+        case 't_junction': rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); rect(-gridSize/2,-gridSize/6,gridSize,gridSize/3); break
+        case 'cross': rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); rect(-gridSize/2,-gridSize/6,gridSize,gridSize/3); break
+        case 'roundabout': ellipse(0,0,gridSize*0.8,gridSize*0.8); break
+        case 'flyover': rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); rect(-gridSize/2,-gridSize/6,gridSize,gridSize/3); break
+    }
+}
+
+function handleTraffic() {
+    spawnTimer++
+    if (spawnTimer > spawnInterval) {
+        spawnCar(); spawnTimer = 0
+        if (spawnInterval > 30) spawnInterval--
+    }
+    cars.forEach(c => c.update())
+    // remove cars that have reached their destination
+    cars = cars.filter(c => c.currentIndex < c.path.length - 1)
+}
+
+function spawnCar() {
+    const start = random(spawnPoints)
+    const end   = random(exitPoints)
+    const path  = findPath(start,end)
+    if (path) cars.push(new Car(path))
+}
+
+function findPath(start,end) {/* BFS unchanged */
+    const visited = Array(cols).fill().map(()=>Array(rows).fill(false))
+    const prev    = Array(cols).fill().map(()=>Array(rows).fill(null))
+    const queue = [{x:start.x,y:start.y}]
+    visited[start.x][start.y]=true
+    while(queue.length){
+        const cell=queue.shift()
+        if(cell.x==end.x&&cell.y==end.y) break
+        const tile=roadGrid[cell.x][cell.y]
+        if(!tile) continue
+        tile.connections.forEach(dir=>{
+            const nx=cell.x+dir[0], ny=cell.y+dir[1]
+            if(nx>=0&&nx<cols&&ny>=0&&ny<rows&&!visited[nx][ny]){
+                const nb=roadGrid[nx][ny]
+                if(nb&&nb.connections.some(d=>d[0]==-dir[0]&&d[1]==-dir[1])){
+                    visited[nx][ny]=true; prev[nx][ny]=cell; queue.push({x:nx,y:ny})
+                }
+            }
+        })
+    }
+    if(!visited[end.x][end.y]) return null
+    const path=[]; let cur={x:end.x,y:end.y}
+    while(cur){path.push(cur);cur=prev[cur.x][cur.y]}
+    return path.reverse()
+}
+
+class Car {
+    constructor(path){this.path=path;this.currentIndex=0;
+        this.pos=createVector(path[0].x*gridSize+gridSize/2,path[0].y*gridSize+gridSize/2);
+        this.speed=1
+    }
+    update(){
+        if(this.currentIndex<this.path.length-1){
+            const tgt=this.path[this.currentIndex+1]
+            const tpos=createVector(tgt.x*gridSize+gridSize/2,tgt.y*gridSize+gridSize/2)
+            const dir=p5.Vector.sub(tpos,this.pos)
+            if(dir.mag()>this.speed){dir.normalize().mult(this.speed);this.pos.add(dir)}
+            else{this.pos=tpos.copy();this.currentIndex++}
+        }
+    }
+    show(){noStroke();fill(255,0,0);ellipse(this.pos.x,this.pos.y,gridSize/2)}
+}
+
+function drawCars(){cars.forEach(c=>c.show())}
+
+function showSelectionInfo(){
+    if (height > INFO_PANEL_HEIGHT) {
+        noStroke(); fill(255,255,255,150)
+        rect(0, height - INFO_PANEL_HEIGHT, width, INFO_PANEL_HEIGHT)
+        fill(0); textSize(14)
+        text('Press keys 1-6 to choose road piece', 10, height - 45)
+        text('Right click to rotate by 90 (debounced)', 10, height - 30)
+        text('Map expands every ' + EXPAND_SECONDS + 's and traffic increases', 10, height - 15)
+        text('Selected: ' + selectedRoadType, 10, 15)
+    }
+}
+
+function mousePressed(){
+    const i=floor(mouseX/gridSize), j=floor(mouseY/gridSize)
+    if(i<0||i>=cols||j<0||j>=rows) return
+    if(mouseButton === RIGHT && roadGrid[i][j]) {
+        const now = millis()
+        if (now - lastRotationTime > 200) {
+            roadGrid[i][j].rotation = (roadGrid[i][j].rotation + 90) % 360
+            roadGrid[i][j].connections = getConnections(roadGrid[i][j].type, roadGrid[i][j].rotation)
+            lastRotationTime = now
+        }
+    } else if(mouseButton===LEFT&& !roadGrid[i][j]){
+        roadGrid[i][j]=new RoadTile(i,j,selectedRoadType,0)
+    }
+}
+
+function keyPressed(){
+    if(key==='1')selectedRoadType='straight'
+    if(key==='2')selectedRoadType='corner'
+    if(key==='3')selectedRoadType='t_junction'
+    if(key==='4')selectedRoadType='cross'
+    if(key==='5')selectedRoadType='roundabout'
+    if(key==='6')selectedRoadType='flyover'
+}
+
+// consider Godot 2D tilemap for further scaling
+</script>
+</body>
+</html>
