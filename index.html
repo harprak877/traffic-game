@@ -17,6 +17,7 @@ const EXPAND_SECONDS = 30            // seconds between expansions
 let expandInterval = EXPAND_SECONDS * 60  // frames between expansions (assuming 60 fps)
 const MAX_SPAWN_POINTS = 10         // cap for spawn/exit arrays
 let lastRotationTime = 0            // for debouncing right-click rotation
+let lastExpandTime = 0              // for debouncing expansion
 const INFO_PANEL_HEIGHT = 60        // height of info panel
 let expandTimer = 0                // counts frames for expansion
 
@@ -33,6 +34,13 @@ let spawnInterval = 120 // frames per new car, decreases over time
 
 // user selection state
 let selectedRoadType = 'straight'  // current road piece chosen by player
+
+// scoring and effects
+let score = 0
+let lastScoreUpdate = 0
+let dayNightCycle = 0
+let rainParticles = []
+let weatherIntensity = 0
 
 function setup() {
     let cnv = createCanvas(gridSize * cols, gridSize * rows)
@@ -65,33 +73,217 @@ function initCongestionGrid() {
     }
 }
 
-// define one spawn on left edge and one exit on right edge
+// Generate randomized spawn/exit points with auto-generated connecting path
 // Using plain integer objects instead of createVector to avoid float index issues
 function initSpawnAndExit() {
-    spawnPoints = [ {x: 0, y: floor(rows / 2)} ]
-    exitPoints  = [ {x: cols - 1, y: floor(rows / 2)} ]
+    // Choose random edges for spawn and exit (opposite edges)
+    let edges = ['top', 'bottom', 'left', 'right']
+    let spawnEdge = random(edges)
+    let exitEdge = getOppositeEdge(spawnEdge)
+    
+    // Generate spawn and exit points on chosen edges
+    let spawn = getRandomPointOnEdge(spawnEdge)
+    let exit = getRandomPointOnEdge(exitEdge)
+    
+    spawnPoints = [spawn]
+    exitPoints = [exit]
+    
+    // Auto-generate a path between spawn and exit
+    generateStarterPath(spawn, exit)
+}
+
+function getOppositeEdge(edge) {
+    switch(edge) {
+        case 'top': return 'bottom'
+        case 'bottom': return 'top'
+        case 'left': return 'right'
+        case 'right': return 'left'
+    }
+}
+
+function getRandomPointOnEdge(edge) {
+    switch(edge) {
+        case 'top': return {x: floor(random(1, cols-1)), y: 0}
+        case 'bottom': return {x: floor(random(1, cols-1)), y: rows-1}
+        case 'left': return {x: 0, y: floor(random(1, rows-1))}
+        case 'right': return {x: cols-1, y: floor(random(1, rows-1))}
+    }
+}
+
+function generateStarterPath(spawn, exit) {
+    // Simple path generation - straight line with corners as needed
+    let current = {x: spawn.x, y: spawn.y}
+    let path = [current]
+    
+    // First, move towards exit horizontally
+    while (current.x !== exit.x) {
+        if (current.x < exit.x) {
+            current = {x: current.x + 1, y: current.y}
+        } else {
+            current = {x: current.x - 1, y: current.y}
+        }
+        path.push({...current})
+    }
+    
+    // Then move vertically
+    while (current.y !== exit.y) {
+        if (current.y < exit.y) {
+            current = {x: current.x, y: current.y + 1}
+        } else {
+            current = {x: current.x, y: current.y - 1}
+        }
+        path.push({...current})
+    }
+    
+    // Place road tiles along the path
+    for (let i = 0; i < path.length; i++) {
+        let point = path[i]
+        let tileType = 'straight'
+        let rotation = 0
+        
+        if (i === 0) {
+            // First tile - determine direction
+            if (i + 1 < path.length) {
+                let next = path[i + 1]
+                if (next.x > point.x) rotation = 0      // East
+                else if (next.x < point.x) rotation = 180  // West
+                else if (next.y > point.y) rotation = 90   // South
+                else rotation = 270                        // North
+            }
+        } else if (i === path.length - 1) {
+            // Last tile - determine from previous
+            let prev = path[i - 1]
+            if (prev.x < point.x) rotation = 0      // From West
+            else if (prev.x > point.x) rotation = 180  // From East
+            else if (prev.y < point.y) rotation = 90   // From North
+            else rotation = 270                        // From South
+        } else {
+            // Middle tile - check if it's a corner
+            let prev = path[i - 1]
+            let next = path[i + 1]
+            
+            let prevDir = {x: point.x - prev.x, y: point.y - prev.y}
+            let nextDir = {x: next.x - point.x, y: next.y - point.y}
+            
+            // If direction changes, it's a corner
+            if (prevDir.x !== nextDir.x || prevDir.y !== nextDir.y) {
+                tileType = 'corner'
+                // Determine corner rotation based on directions
+                if (prevDir.x === 1 && nextDir.y === 1) rotation = 0      // East to South
+                else if (prevDir.y === 1 && nextDir.x === -1) rotation = 90   // South to West
+                else if (prevDir.x === -1 && nextDir.y === -1) rotation = 180  // West to North
+                else if (prevDir.y === -1 && nextDir.x === 1) rotation = 270   // North to East
+                else if (prevDir.x === -1 && nextDir.y === 1) rotation = 0     // West to South
+                else if (prevDir.y === -1 && nextDir.x === -1) rotation = 90   // North to West
+                else if (prevDir.x === 1 && nextDir.y === -1) rotation = 180   // East to North
+                else if (prevDir.y === 1 && nextDir.x === 1) rotation = 270    // South to East
+            } else {
+                // Straight tile
+                if (prevDir.x !== 0) rotation = 0    // Horizontal
+                else rotation = 90                   // Vertical
+            }
+        }
+        
+        roadGrid[point.x][point.y] = new RoadTile(point.x, point.y, tileType, rotation)
+    }
 }
 
 function draw() {
-    background(180, 220, 180)   // grass color
+    // Day-night cycle and weather
+    updateDayNightCycle()
+    updateWeather()
+    
+    drawTexturedBackground()
     drawGrid()                   // show grid lines
     handleTraffic()              // spawn cars and update movement
     resetCongestion()            // clear counts and recount each frame
     drawRoads()                  // draw road tiles with congestion glow
     drawCars()                   // render each car on top
+    drawWeatherEffects()         // rain/fog effects
+    drawGhostPreview()           // show preview of selected tile
+    updateScore()                // calculate and update score
     showSelectionInfo()          // display which road piece is selected
+    showScore()                  // display current score
 
-    // expand map over time
+    // expand map over time with debounce
     expandTimer++
-    if (expandTimer >= expandInterval) {
+    if (expandTimer >= expandInterval && millis() - lastExpandTime > 1000) {
         expandMap()
         expandTimer = 0
+        lastExpandTime = millis()
+    }
+}
+
+function updateDayNightCycle() {
+    dayNightCycle = sin(frameCount / 300) // Slow cycle
+    let dayColor = color(120, 160, 120)
+    let nightColor = color(40, 60, 80)
+    let currentBg = lerpColor(dayColor, nightColor, (dayNightCycle + 1) / 2)
+    background(currentBg)
+}
+
+function updateWeather() {
+    // Random weather changes
+    if (frameCount % 600 === 0) { // Every 10 seconds
+        weatherIntensity = random(0, 1)
+    }
+    
+    // Add rain particles
+    if (weatherIntensity > 0.3) {
+        for (let i = 0; i < weatherIntensity * 5; i++) {
+            rainParticles.push({
+                x: random(width),
+                y: -10,
+                speed: random(3, 8)
+            })
+        }
+    }
+    
+    // Update rain particles
+    for (let i = rainParticles.length - 1; i >= 0; i--) {
+        rainParticles[i].y += rainParticles[i].speed
+        if (rainParticles[i].y > height) {
+            rainParticles.splice(i, 1)
+        }
+    }
+}
+
+function drawWeatherEffects() {
+    if (weatherIntensity > 0.3) {
+        // Draw rain
+        stroke(150, 150, 255, 150)
+        strokeWeight(1)
+        for (let particle of rainParticles) {
+            line(particle.x, particle.y, particle.x - 2, particle.y - 8)
+        }
+        
+        // Draw fog overlay
+        if (weatherIntensity > 0.6) {
+            fill(200, 200, 255, 30)
+            noStroke()
+            rect(0, 0, width, height)
+        }
+    }
+}
+
+// draw textured grass background
+function drawTexturedBackground() {
+    // Add subtle noise texture to grass
+    for (let i = 0; i < width; i += 4) {
+        for (let j = 0; j < height; j += 4) {
+            let variation = noise(i * 0.01, j * 0.01) * 30
+            let baseGreen = 120 + (dayNightCycle * 30) // Darker at night
+            fill(baseGreen + variation, 160 + variation, baseGreen + variation, 50)
+            noStroke()
+            rect(i, j, 4, 4)
+        }
     }
 }
 
 // draw grid lines
 function drawGrid() {
-    stroke(200)
+    stroke(140, 180, 140, 100)  // Subtle grid lines
+    strokeWeight(1)
     for (let i = 0; i <= cols; i++) {
         line(i * gridSize, 0, i * gridSize, height)
     }
@@ -180,48 +372,116 @@ function getConnections(type, rotation) {
 }
 
 function drawRoads() {
-    for (let i = 0; i < cols; i++)
-    for (let j = 0; j < rows; j++) {
+    // Lazy rendering - only draw tiles within view bounds (with small buffer)
+    let minI = max(0, floor(-gridSize / gridSize))
+    let maxI = min(cols, ceil((width + gridSize) / gridSize))
+    let minJ = max(0, floor(-gridSize / gridSize))
+    let maxJ = min(rows, ceil((height + gridSize) / gridSize))
+    
+    for (let i = minI; i < maxI; i++)
+    for (let j = minJ; j < maxJ; j++) {
         const tile = roadGrid[i]?.[j]
         if (!tile) continue
-        if (congestionGrid[i][j] > 2) {
-            noStroke(); fill(255,0,0,100)
+        
+        // Draw gradient congestion glow
+        let carCount = congestionGrid[i][j]
+        if (carCount > 0) {
+            let congestionColor
+            if (carCount <= 2) {
+                congestionColor = lerpColor(color(0,255,0,80), color(255,255,0,100), carCount/2)
+            } else {
+                congestionColor = lerpColor(color(255,255,0,100), color(255,0,0,120), min((carCount-2)/3, 1))
+            }
+            noStroke(); fill(congestionColor)
             rect(i*gridSize,j*gridSize,gridSize,gridSize)
         }
+        
         push(); translate(i*gridSize+gridSize/2, j*gridSize+gridSize/2)
-        rotate(radians(tile.rotation)); drawTileShape(tile.type); pop()
+        rotate(radians(tile.rotation)); drawTileShape(tile.type, tile); pop()
+        
+        // Draw traffic flow arrows
+        drawTrafficArrows(i, j, tile)
     }
 }
 
-function drawTileShape(type) {
-    // Set default stroke and fill for consistent appearance
-    stroke(80); strokeWeight(2); fill(150)
+function drawTileShape(type, tile) {
+    // Enhanced road colors - darker asphalt look
+    let roadColor = color(60, 60, 60)
+    let shadowColor = color(40, 40, 40)
     
+    // Draw shadow first (offset slightly)
+    push()
+    translate(2, 2)
+    noStroke(); fill(shadowColor)
+    drawShapeGeometry(type)
+    pop()
+    
+    // Draw main road
+    noStroke(); fill(roadColor)
+    drawShapeGeometry(type)
+    
+    // Add lane markings
+    stroke(200, 200, 0); strokeWeight(1)
+    drawLaneMarkings(type)
+    
+    // Special coloring for spawn/exit points
+    if (isSpawnPoint(tile)) {
+        fill(0, 255, 0, 100)  // Green overlay for spawn
+        drawShapeGeometry(type)
+    } else if (isExitPoint(tile)) {
+        fill(0, 100, 255, 100)  // Blue overlay for exit
+        drawShapeGeometry(type)
+    }
+}
+
+function drawShapeGeometry(type) {
     switch(type) {
         case 'straight': 
-            rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); 
+            // Rounded ends for straight roads
+            rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize, 4); 
             break
         case 'corner': 
-            // Use arc for smoother corners with slight size increase to prevent gaps
-            noStroke(); fill(150)
-            arc(0,0,gridSize*1.01,gridSize*1.01,0,HALF_PI)
+            // Smooth bezier corner
+            beginShape()
+            vertex(-gridSize/6, 0)
+            bezierVertex(-gridSize/6, -gridSize/4, -gridSize/4, -gridSize/6, 0, -gridSize/6)
+            vertex(gridSize/2, -gridSize/6)
+            vertex(gridSize/2, gridSize/6)
+            bezierVertex(gridSize/4, gridSize/6, gridSize/6, gridSize/4, gridSize/6, 0)
+            vertex(gridSize/6, gridSize/2)
+            vertex(-gridSize/6, gridSize/2)
+            endShape(CLOSE)
             break
         case 't_junction': 
-            rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); 
-            rect(-gridSize/2,-gridSize/6,gridSize,gridSize/3); 
+            rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize, 4); 
+            rect(-gridSize/2,-gridSize/6,gridSize,gridSize/3, 4); 
             break
         case 'cross': 
-            rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); 
-            rect(-gridSize/2,-gridSize/6,gridSize,gridSize/3); 
+            rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize, 4); 
+            rect(-gridSize/2,-gridSize/6,gridSize,gridSize/3, 4); 
             break
         case 'roundabout': 
-            // Override for special roundabout appearance
-            noStroke(); fill(0,200,0)
             ellipse(0,0,gridSize*0.8,gridSize*0.8); 
             break
         case 'flyover': 
-            rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); 
-            rect(-gridSize/2,-gridSize/6,gridSize,gridSize/3); 
+            rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize, 4); 
+            rect(-gridSize/2,-gridSize/6,gridSize,gridSize/3, 4); 
+            break
+    }
+}
+
+function drawLaneMarkings(type) {
+    switch(type) {
+        case 'straight':
+            line(0, -gridSize/2, 0, gridSize/2)
+            break
+        case 't_junction':
+            line(0, -gridSize/2, 0, gridSize/2)
+            line(-gridSize/2, 0, gridSize/2, 0)
+            break
+        case 'cross':
+            line(0, -gridSize/2, 0, gridSize/2)
+            line(-gridSize/2, 0, gridSize/2, 0)
             break
     }
 }
@@ -302,13 +562,128 @@ class Car {
 
 function drawCars(){cars.forEach(c=>c.show())}
 
+function drawTrafficArrows(i, j, tile) {
+    if (!tile.connections) return
+    
+    push()
+    translate(i*gridSize+gridSize/2, j*gridSize+gridSize/2)
+    stroke(150, 150, 0, 150)
+    strokeWeight(2)
+    
+    tile.connections.forEach(dir => {
+        let angle = atan2(dir[1], dir[0])
+        push()
+        rotate(angle)
+        translate(gridSize/4, 0)
+        line(-3, -3, 0, 0)
+        line(-3, 3, 0, 0)
+        pop()
+    })
+    pop()
+}
+
+function drawGhostPreview() {
+    if (mouseX >= 0 && mouseX < width && mouseY >= 0 && mouseY < height) {
+        let i = floor(mouseX / gridSize)
+        let j = floor(mouseY / gridSize)
+        
+        if (i >= 0 && i < cols && j >= 0 && j < rows) {
+            // Show hover highlight
+            if (roadGrid[i][j]) {
+                // Invalid placement - red overlay
+                fill(255, 0, 0, 100)
+                noStroke()
+                rect(i*gridSize, j*gridSize, gridSize, gridSize)
+            } else {
+                // Valid placement - show ghost preview
+                fill(255, 255, 255, 50)
+                stroke(255, 255, 255, 100)
+                strokeWeight(2)
+                rect(i*gridSize, j*gridSize, gridSize, gridSize)
+                
+                // Draw ghost tile
+                push()
+                translate(i*gridSize+gridSize/2, j*gridSize+gridSize/2)
+                fill(255, 255, 255, 80)
+                noStroke()
+                drawShapeGeometry(selectedRoadType)
+                pop()
+            }
+        }
+    }
+}
+
+function isSpawnPoint(tile) {
+    if (!tile) return false
+    return spawnPoints.some(sp => sp.x === tile.x && sp.y === tile.y)
+}
+
+function isExitPoint(tile) {
+    if (!tile) return false
+    return exitPoints.some(ep => ep.x === tile.x && ep.y === tile.y)
+}
+
+function updateScore() {
+    if (millis() - lastScoreUpdate > 1000) { // Update every second
+        let totalCongestion = 0
+        let totalCars = cars.length
+        
+        // Calculate congestion penalty
+        for (let i = 0; i < cols; i++) {
+            for (let j = 0; j < rows; j++) {
+                if (congestionGrid[i][j] > 2) {
+                    totalCongestion += congestionGrid[i][j] - 2
+                }
+            }
+        }
+        
+        // Score increases for smooth traffic, decreases for congestion
+        let scoreChange = totalCars * 10 - totalCongestion * 5
+        score += scoreChange
+        score = max(0, score) // Don't go below 0
+        
+        lastScoreUpdate = millis()
+    }
+}
+
+function showScore() {
+    // Score display in top-right
+    let scoreColor = color(0, 255, 0) // Default green
+    let totalCongestion = 0
+    
+    for (let i = 0; i < cols; i++) {
+        for (let j = 0; j < rows; j++) {
+            if (congestionGrid[i][j] > 2) {
+                totalCongestion += congestionGrid[i][j] - 2
+            }
+        }
+    }
+    
+    // Color based on performance
+    if (totalCongestion > 10) {
+        scoreColor = color(255, 0, 0) // Red for high congestion
+    } else if (totalCongestion > 5) {
+        scoreColor = color(255, 255, 0) // Yellow for medium congestion
+    }
+    
+    fill(0, 0, 0, 150)
+    noStroke()
+    rect(width - 150, 10, 140, 30, 5)
+    
+    fill(scoreColor)
+    textSize(16)
+    textAlign(RIGHT)
+    text('Score: ' + score, width - 20, 30)
+    textAlign(LEFT) // Reset alignment
+}
+
 function showSelectionInfo(){
     if (height > INFO_PANEL_HEIGHT) {
         noStroke(); fill(255,255,255,150)
         rect(0, height - INFO_PANEL_HEIGHT, width, INFO_PANEL_HEIGHT)
         fill(0); textSize(14)
         text('Press keys 1-6 to choose road piece', 10, height - 45)
-        text('Right click to rotate by 90 (debounced)', 10, height - 30)
+        text('Shift+click or right-click to rotate', 10, height - 30)
         text('Map expands every ' + EXPAND_SECONDS + 's and traffic increases', 10, height - 15)
         text('Selected: ' + selectedRoadType, 10, 15)
     }
@@ -317,14 +692,18 @@ function showSelectionInfo(){
 function mousePressed(){
     const i=floor(mouseX/gridSize), j=floor(mouseY/gridSize)
     if(i<0||i>=cols||j<0||j>=rows) return
-    if(mouseButton === RIGHT && roadGrid[i][j]) {
+    
+    // Handle rotation with right-click or Shift+left-click
+    if ((mouseButton === RIGHT || (mouseButton === LEFT && keyIsDown(SHIFT))) && roadGrid[i][j]) {
         const now = millis()
         if (now - lastRotationTime > 200) {
             roadGrid[i][j].rotation = (roadGrid[i][j].rotation + 90) % 360
             roadGrid[i][j].connections = getConnections(roadGrid[i][j].type, roadGrid[i][j].rotation)
             lastRotationTime = now
         }
-    } else if(mouseButton===LEFT&& !roadGrid[i][j]){
+    } 
+    // Handle placement with left-click (without shift)
+    else if(mouseButton===LEFT && !keyIsDown(SHIFT) && !roadGrid[i][j]){
         roadGrid[i][j]=new RoadTile(i,j,selectedRoadType,0)
     }
 }
