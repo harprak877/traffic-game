@@ -66,9 +66,10 @@ function initCongestionGrid() {
 }
 
 // define one spawn on left edge and one exit on right edge
+// Using plain integer objects instead of createVector to avoid float index issues
 function initSpawnAndExit() {
-    spawnPoints = [ createVector(0, floor(rows / 2)) ]
-    exitPoints  = [ createVector(cols - 1, floor(rows / 2)) ]
+    spawnPoints = [ {x: 0, y: floor(rows / 2)} ]
+    exitPoints  = [ {x: cols - 1, y: floor(rows / 2)} ]
 }
 
 function draw() {
@@ -103,6 +104,9 @@ function drawGrid() {
 function expandMap() {
     cols++
     rows++
+    // Note: resizeCanvas triggers a redraw next frame. If you need to reference
+    // width/height immediately after this call (same call stack), be aware that
+    // p5 may not have updated them yet.
     resizeCanvas(gridSize * cols, gridSize * rows)
     // extend each existing row
     for (let i = 0; i < cols; i++) {
@@ -120,9 +124,12 @@ function expandMap() {
         congestionGrid.push(Array(rows).fill(0))
     }
     // adjust spawn/exit on new edges
-    spawnPoints.push(createVector(0, rows - 1))
-    exitPoints.push(createVector(cols - 1, 0))
+    spawnPoints.push({x: 0, y: rows - 1})
+    exitPoints.push({x: cols - 1, y: 0})
     // prune old spawn/exit entries
+    // Note: Pruning removes oldest entries regardless of road connectivity.
+    // In very long games, this could remove spawn/exit points that are still
+    // reachable by roads, potentially affecting pathfinding.
     if (spawnPoints.length > MAX_SPAWN_POINTS) spawnPoints.shift()
     if (exitPoints.length  > MAX_SPAWN_POINTS) exitPoints.shift()
     // increase traffic further upon expansion
@@ -181,20 +188,41 @@ function drawRoads() {
             noStroke(); fill(255,0,0,100)
             rect(i*gridSize,j*gridSize,gridSize,gridSize)
         }
-        noStroke(); fill(100)
         push(); translate(i*gridSize+gridSize/2, j*gridSize+gridSize/2)
         rotate(radians(tile.rotation)); drawTileShape(tile.type); pop()
     }
 }
 
 function drawTileShape(type) {
+    // Set default stroke and fill for consistent appearance
+    stroke(80); strokeWeight(2); fill(150)
+    
     switch(type) {
-        case 'straight': rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); break
-        case 'corner': rect(-gridSize/6,0,gridSize/3,gridSize/2); rect(0,-gridSize/6,gridSize/2,gridSize/3); break
-        case 't_junction': rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); rect(-gridSize/2,-gridSize/6,gridSize,gridSize/3); break
-        case 'cross': rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); rect(-gridSize/2,-gridSize/6,gridSize,gridSize/3); break
-        case 'roundabout': ellipse(0,0,gridSize*0.8,gridSize*0.8); break
-        case 'flyover': rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); rect(-gridSize/2,-gridSize/6,gridSize,gridSize/3); break
+        case 'straight': 
+            rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); 
+            break
+        case 'corner': 
+            // Use arc for smoother corners with slight size increase to prevent gaps
+            noStroke(); fill(150)
+            arc(0,0,gridSize*1.01,gridSize*1.01,0,HALF_PI)
+            break
+        case 't_junction': 
+            rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); 
+            rect(-gridSize/2,-gridSize/6,gridSize,gridSize/3); 
+            break
+        case 'cross': 
+            rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); 
+            rect(-gridSize/2,-gridSize/6,gridSize,gridSize/3); 
+            break
+        case 'roundabout': 
+            // Override for special roundabout appearance
+            noStroke(); fill(0,200,0)
+            ellipse(0,0,gridSize*0.8,gridSize*0.8); 
+            break
+        case 'flyover': 
+            rect(-gridSize/6,-gridSize/2,gridSize/3,gridSize); 
+            rect(-gridSize/2,-gridSize/6,gridSize,gridSize/3); 
+            break
     }
 }
 
@@ -205,8 +233,8 @@ function handleTraffic() {
         if (spawnInterval > 30) spawnInterval--
     }
     cars.forEach(c => c.update())
-    // remove cars that have reached their destination
-    cars = cars.filter(c => c.currentIndex < c.path.length - 1)
+    // remove cars that have reached their destination or are stuck
+    cars = cars.filter(c => c.currentIndex < c.path.length - 1 && !c.isStuck())
 }
 
 function spawnCar() {
@@ -243,18 +271,31 @@ function findPath(start,end) {/* BFS unchanged */
 }
 
 class Car {
-    constructor(path){this.path=path;this.currentIndex=0;
+    constructor(path){
+        this.path=path;
+        this.currentIndex=0;
         this.pos=createVector(path[0].x*gridSize+gridSize/2,path[0].y*gridSize+gridSize/2);
-        this.speed=1
+        this.speed=1;
+        this.lastProgressTime = millis(); // track when car last advanced
+        this.stuckThreshold = 5000; // 5 seconds in milliseconds
     }
     update(){
         if(this.currentIndex<this.path.length-1){
             const tgt=this.path[this.currentIndex+1]
             const tpos=createVector(tgt.x*gridSize+gridSize/2,tgt.y*gridSize+gridSize/2)
             const dir=p5.Vector.sub(tpos,this.pos)
-            if(dir.mag()>this.speed){dir.normalize().mult(this.speed);this.pos.add(dir)}
-            else{this.pos=tpos.copy();this.currentIndex++}
+            if(dir.mag()>this.speed){
+                dir.normalize().mult(this.speed);
+                this.pos.add(dir)
+            } else {
+                this.pos=tpos.copy();
+                this.currentIndex++;
+                this.lastProgressTime = millis(); // reset timer when advancing
+            }
         }
+    }
+    isStuck(){
+        return millis() - this.lastProgressTime > this.stuckThreshold;
     }
     show(){noStroke();fill(255,0,0);ellipse(this.pos.x,this.pos.y,gridSize/2)}
 }
